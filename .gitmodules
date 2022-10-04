@@ -1,0 +1,3 @@
+[submodule "sliptun"]
+	path = sliptun
+	url = https://github.com/jg1uaa/sliptun
