@@ -7,7 +7,7 @@ all: $(TARGET)
 kiss.o: kiss.c
 	$(CC) $(CFLAGS) $< -o $@
 
-sliptun.o: sliptun/sliptun.c
+sliptun.o: sliptun.c
 	$(CC) $(CFLAGS) $< -o $@
 
 $(TARGET): $(OBJ)
