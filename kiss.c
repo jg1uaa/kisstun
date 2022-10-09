@@ -227,10 +227,10 @@ bool ext_init(int argc, char *argv[])
 	for (i = 1; i < argc; i++) {
 		switch (argv[i][0]) {
 		case 's':
-			src = ax25_set_callsign(&ax_srccall, &argv[1][1]);
+			src = ax25_set_callsign(&ax_srccall, &argv[i][1]);
 			break;
 		case 'd':
-			dst = ax25_set_callsign(&ax_dstcall, &argv[2][1]);
+			dst = ax25_set_callsign(&ax_dstcall, &argv[i][1]);
 			break;
 		default:
 			goto fail;
