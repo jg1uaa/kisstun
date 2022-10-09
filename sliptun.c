@@ -21,22 +21,30 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
+#include <net/if_arp.h>
 #include <netinet/in.h>
+#include <netinet/if_ether.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <poll.h>
 
-#if defined(__OpenBSD__)
-#define USE_TUN_PI /* OpenBSD requires TUN packet information (PI) */
-#define PROTO_INET AF_INET
-#define PROTO_INET6 AF_INET6
-#elif defined(__linux__)
-/* Linux supports TUN PI, but not used */
+#if defined(__linux__)
 #include <sys/ioctl.h>
 #include <linux/if.h>
 #include <linux/if_tun.h>
+#define PROTO_INET ETH_P_IP
+#define PROTO_INET6 ETH_P_IPV6
 #else
-/* Others (FreeBSD/NetBSD/DragonflyBSD) has no PI */
+#if defined(__OpenBSD__) || defined(__NetBSD__)
+#include <net/ethertypes.h>
+#elif defined(__FreeBSD__) || defined(__DragonFly__)
+#include <net/ethernet.h>
+#endif
+#include <ifaddrs.h>
+#include <net/if_dl.h>
+#include <net/if_types.h>
+#define PROTO_INET ETHERTYPE_IP
+#define PROTO_INET6 ETHERTYPE_IPV6
 #endif
 
 extern char *optarg;
@@ -44,7 +52,7 @@ extern char *optarg;
 static char *serdev = NULL;
 static char *tundev = NULL;
 static bool rtscts = false;
-static bool extmode = false;
+struct ether_addr macaddr_tap;
 
 #define EXTARG_MAX 8
 static int extargc = 0;
@@ -68,22 +76,6 @@ static bool die = false;
 #define BUFSIZE 16384
 #define EXBUFSIZE 128
 
-/*
- * TUN packet information and data frame (see <linux/if_tun.h>)
- *
- * flags: Linux defines TUN_PKT_STRIP (0x0001), but OpenBSD uses this field
- *        as a part of proto. This field should be zero.
- * proto: this shoud be network byte order (big endian).
- *        Linux uses ethernet type defined by <linux/if_ether.h>.
- *        OpenBSD uses address/protocol family, <sys/socket.h>.
- */
-#if defined(USE_TUN_PI) && defined(__OpenBSD__)
-struct tun_pi {
-	uint16_t flags;
-	uint16_t proto;
-} __attribute__((packed));
-#endif
-
 #define END_CHAR 0xc0		/* indicates end of packet */
 #define ESC_CHAR 0xdb		/* indicates byte stuffing */
 #define ESCAPED_END 0xdc	/* ESC ESC_END means END data byte */
@@ -99,32 +91,60 @@ struct decode_work {
 	bool esc;
 };
 
-static int ext_dummy(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
+__attribute__((weak)) int ext_encode(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
 {
-	int n;
+	struct ether_header *h = (struct ether_header *)*buf;
 
-	/* test code: simply move top of buf to exbuf */
-	n = (*len < exlen) ? *len : exlen;
-	memcpy(exbuf, *buf, n);
-	*buf += n;
-	*len -= n;
+	if (*len < sizeof(*h))
+		goto discard;
 
-	return n;
+	/* XXX IPv4 only */
+	switch (ntohs(h->ether_type)) {
+	case PROTO_INET:
+		break;
+	default:
+		goto discard;
+	}
+
+	/* simply discard ethernet header */
+	*buf += sizeof(struct ether_header);
+	*len -= sizeof(struct ether_header);
+
+	return 0;
+discard:
+	return -1;
 }
-int ext_encode(uint8_t **buf, int *len, uint8_t *exbuf, int exlen) __attribute__((weak, alias("ext_dummy")));
-int ext_decode(uint8_t **buf, int *len, uint8_t *exbuf, int exlen) __attribute__((weak, alias("ext_dummy")));
+
+__attribute__((weak)) int ext_decode(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
+{
+	struct ether_header *h = (struct ether_header *)exbuf;
+
+	if (exlen < sizeof(*h) || *len < 1)
+		goto discard;
+
+	/* XXX IPv4 only */
+	switch (**buf >> 4) {
+	case 4:
+		h->ether_type = htons(PROTO_INET);
+		break;
+	default:
+		goto discard;
+	}
+
+	/* remember "arp -s <IP address> ee:ee:ee:ee:ee:ee" */
+	memset(h->ether_shost, 0xee, sizeof(h->ether_shost));
+
+	/* use TAP device address (broad cast address does not work) */
+	memcpy(h->ether_dhost, &macaddr_tap, sizeof(h->ether_dhost));
+
+	return sizeof(*h);
+discard:
+	return -1;
+}
 
 __attribute__((weak)) bool ext_init(int argc, char *argv[])
 {
-	int i;
-
-	printf("extended feature is not implemented\n");
-
-	/* test code */
-	for (i = 0; i <= argc; i++)
-		printf("argv[%d] = %s\n", i,
-		       (argv[i] == NULL) ? "(null)" : argv[i]);
-
+	/* do nothing */
 	return false;
 }
 
@@ -174,13 +194,7 @@ static void *do_slip_rx(__attribute__((unused)) void *arg)
 		.inpos = 0,
 		.esc = false,
 	};
-#ifdef USE_TUN_PI
-	struct tun_pi pi = {.flags = 0};
-#endif
 	struct iovec iov[] = {
-#ifdef USE_TUN_PI
-		{.iov_base = &pi, .iov_len = sizeof(pi)},
-#endif
 		{.iov_base = NULL, .iov_len = 0},
 		{.iov_base = NULL, .iov_len = 0},
 	};
@@ -200,18 +214,11 @@ static void *do_slip_rx(__attribute__((unused)) void *arg)
 
 			p = tun_tx;
 			n = w.outpos;
-			if (extmode) {
-				if ((exsize = ext_decode(&p, &n, exbuf,
-							 sizeof(exbuf))) < 0)
-					goto next;
-			} else {
-				exsize = 0;
-			}
-#ifdef USE_TUN_PI
-			iovcnt = 1;
-#else
+			if ((exsize = ext_decode(&p, &n, exbuf,
+						 sizeof(exbuf))) < 0)
+				goto next;
+
 			iovcnt = 0;
-#endif
 			if (exsize) {
 				iov[iovcnt].iov_base = exbuf;
 				iov[iovcnt].iov_len = exsize;
@@ -222,22 +229,6 @@ static void *do_slip_rx(__attribute__((unused)) void *arg)
 				iov[iovcnt].iov_len = n;
 				iovcnt++;
 			}
-#ifdef USE_TUN_PI
-			/* check IP version from header */
-			if (exsize)
-				p = exbuf;
-
-			switch (p[0] >> 4) {
-			case 4:
-				pi.proto = htons(PROTO_INET);
-				break;
-			case 6:
-				pi.proto = htons(PROTO_INET6);
-				break;
-			default:
-				goto next; /* discard */
-			}
-#endif
 			writev(fd_tun, iov, iovcnt);
 		next:
 			w.outpos = 0;
@@ -284,35 +275,17 @@ static void *do_slip_tx(__attribute__((unused)) void *arg)
 	uint8_t exbuf[EXBUFSIZE], tun_rx[BUFSIZE], *p;
 	/* END_CHAR + escaped character(2) * received size + END_CHAR */
 	uint8_t buf[2 * (sizeof(exbuf) + sizeof(tun_rx)) + 2];
-#ifdef USE_TUN_PI
-	struct tun_pi pi;
-#endif
-	const struct iovec iov[] = {
-#ifdef USE_TUN_PI
-		{.iov_base = &pi, .iov_len = sizeof(pi)},
-#endif
-		{.iov_base = tun_rx, .iov_len = sizeof(tun_rx)},
-	};
-	const int iovcnt = sizeof(iov) / sizeof(struct iovec);
 
 	while (!die) {
-		if ((size = readv(fd_tun, iov, iovcnt)) < 0) {
+		if ((size = read(fd_tun, tun_rx, sizeof(tun_rx))) < 0) {
 			printf("tun read error\n");
 			goto fin0;
 		}
-#ifdef USE_TUN_PI
-		if ((size -= sizeof(pi)) < 0)
-			continue;
-#endif
+
 		p = tun_rx;
 		n = size;
-		if (extmode) {
-			if ((exsize = ext_encode(&p, &n,
-						 exbuf, sizeof(exbuf))) < 0)
-				continue;
-		} else {
-			exsize = 0;
-		}
+		if ((exsize = ext_encode(&p, &n, exbuf, sizeof(exbuf))) < 0)
+			continue;
 
 		w.outpos = 0;
 		encode_slip_frame(buf, sizeof(buf), NULL, 0, &w); // END_CHAR
@@ -413,7 +386,8 @@ static int open_tun(void)
 		goto fin0;
 
 	memset(&ifr, 0, sizeof(ifr));
-	ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
+	/* even if TAP mode, IFF_NO_PI adds flags/proto header */
+	ifr.ifr_flags = IFF_TAP | IFF_NO_PI;
 	snprintf(ifr.ifr_name, IFNAMSIZ, "%s", tundev);
 	if (ioctl(fd, TUNSETIFF, &ifr) < 0)
 		goto fin1;
@@ -429,6 +403,59 @@ fin0:
 #else
 {
 	return open(tundev, O_RDWR | O_EXCL);
+}
+#endif
+
+static int get_etheraddr(void)
+#if defined(__linux__)
+{
+	int fd, ret = -1;
+	struct ifreq ifr;
+
+	if ((fd = socket(AF_INET, SOCK_DGRAM, 0)) < 0)
+		goto fin0;
+
+	snprintf(ifr.ifr_name, IFNAMSIZ, "%s", tundev);
+	if (ioctl(fd, SIOCGIFHWADDR, &ifr) < 0)
+		goto fin1;
+
+	memcpy(&macaddr_tap, ifr.ifr_hwaddr.sa_data, sizeof(macaddr_tap));
+	ret = 0;
+
+fin1:
+	close(fd);
+fin0:
+	return ret;
+}
+#else
+{
+	int ret = -1;
+	char *p;
+	struct ifaddrs *ifa, *ifa0;
+	struct sockaddr_dl *sdl;
+
+	p = strrchr(tundev, '/') + 1;
+	if (p == NULL) p = tundev;
+
+	if (getifaddrs(&ifa0) < 0)
+		goto fin0;
+
+	for (ifa = ifa0; ifa; ifa = ifa->ifa_next) {
+		if ((sdl = (struct sockaddr_dl *)ifa->ifa_addr) == NULL ||
+		    sdl->sdl_family != AF_LINK || sdl->sdl_type != IFT_ETHER)
+			continue;
+
+		if (!memcmp(p, sdl->sdl_data, sdl->sdl_nlen)) {
+			memcpy(&macaddr_tap, LLADDR(sdl), sizeof(macaddr_tap));
+			ret = 0;
+			goto fin1;
+		}
+	}		
+
+fin1:
+	freeifaddrs(ifa0);
+fin0:
+	return ret;
 }
 #endif
 
@@ -632,6 +659,10 @@ static int do_main(void)
 		printf("device open error (tun)\n");
 		goto fin0;
 	}
+	if (get_etheraddr() < 0) {
+		printf("failed to get ethernet address\n");
+		goto fin1;
+	}
 
 	switch (portmode) {
 	case SERIAL:
@@ -701,7 +732,6 @@ int main(int argc, char *argv[])
 			rtscts = true;
 			break;
 		case 'x':
-			extmode = true;
 			if (extargc < EXTARG_MAX)
 				extargv[extargc++] = optarg;
 			break;
@@ -711,11 +741,11 @@ int main(int argc, char *argv[])
 	if (serdev == NULL || tundev == NULL || portmode == NONE ||
 	    (portmode == SERIAL && get_speed(portarg) < 0)) {
 		printf("usage: %s -s [serial speed] -l [serial device] "
-		       "-t [tun device]\n", argv[0]);
+		       "-t [tap device]\n", argv[0]);
 		goto fin0;
 	}
 
-	if (extmode && ext_init(extargc, extargv))
+	if (ext_init(extargc, extargv))
 		goto fin0;
 
 	do_main();
