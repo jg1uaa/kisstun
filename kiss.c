@@ -325,7 +325,7 @@ int ext_decode(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
 
 	/* set ethernet address */
 	ax25call2ether(h->ether_shost, &k->h.src);
-	if (ax25_match_callsign(&ax_bcastcall, &k->h.dst))
+	if (!ax25_match_callsign(&ax_bcastcall, &k->h.dst))
 		memset(h->ether_dhost, 0xff, sizeof(h->ether_dhost));
 	else
 		memcpy(h->ether_dhost, &macaddr_tap, sizeof(h->ether_dhost));
