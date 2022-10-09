@@ -1,8 +1,11 @@
 TARGET = kisstun
 OBJ = kiss.o sliptun.o
-CFLAGS = -O2 -Wall -c
+TARGET2 = call2mac
+OBJ2 = kiss.o call2mac.o
+CFLAGS = -O2 -Wall -c -fdata-sections -ffunction-sections
+LFLAGS = -Wl,--gc-sections
 
-all: $(TARGET)
+all: $(TARGET) $(TARGET2)
 
 kiss.o: kiss.c
 	$(CC) $(CFLAGS) $< -o $@
@@ -10,8 +13,14 @@ kiss.o: kiss.c
 sliptun.o: sliptun.c
 	$(CC) $(CFLAGS) $< -o $@
 
+call2mac.o: call2mac.c
+	$(CC) $(CFLAGS) $< -o $@
+
 $(TARGET): $(OBJ)
-	$(CC) -pthread $(OBJ) -o $@
+	$(CC) $(LFLAGS) -pthread $(OBJ) -o $@
+
+$(TARGET2): $(OBJ2)
+	$(CC) $(LFLAGS) $(OBJ2) -o $@
 
 clean:
-	rm -f $(TARGET) $(OBJ)
+	rm -f $(TARGET) $(OBJ) $(TARGET2) $(OBJ2)
