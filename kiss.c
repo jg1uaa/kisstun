@@ -20,7 +20,7 @@
 #if defined(__linux__)
 #include <linux/if.h>
 #define PROTO_INET ETH_P_IP
-#define PROTO_INET6 ETH_P_IPV6
+#define PROTO_ARP ETH_P_ARP
 #else
 #if defined(__OpenBSD__) || defined(__NetBSD__)
 #include <net/ethertypes.h>
@@ -28,7 +28,7 @@
 #include <net/ethernet.h>
 #endif
 #define PROTO_INET ETHERTYPE_IP
-#define PROTO_INET6 ETHERTYPE_IPV6
+#define PROTO_ARP ETHERTYPE_ARP
 #endif
 
 static uint8_t etheraddr_0th_octet = 0xfe;
@@ -52,6 +52,7 @@ struct ax25header {
 
 #define CONTROL_UI 0x03
 #define PID_ARPA_IP 0xcc
+#define PID_ARPA_ARP 0xcd
 
 struct kissheader {
 	uint8_t command;
@@ -59,9 +60,39 @@ struct kissheader {
 } __attribute__((packed));
 
 static struct ax25callsign ax_srccall, ax_bcastcall;
-extern struct ether_addr macaddr_tap;
+extern struct ether_addr macaddr_tap __attribute__((weak));
+
+static const struct ax25callsign ax_blank = {
+	{0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, 0x00
+};
+static const struct ether_addr macaddr_any = {
+	{0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+};
+static const struct ether_addr macaddr_bcast = {
+	{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+};
 
 #define AX_BCASTCALL_DEFAULT "QST"
+
+struct arphdr_ether {
+	struct arphdr h;
+	struct ether_addr ar_sha;
+	in_addr_t ar_spa;
+	struct ether_addr ar_tha;
+	in_addr_t ar_tpa;
+} __attribute__((packed));
+
+struct arphdr_ax25 {
+	struct arphdr h;
+	struct ax25callsign ar_sha;
+	in_addr_t ar_spa;
+	struct ax25callsign ar_tha;
+	in_addr_t ar_tpa;
+} __attribute__((packed));
+
+#ifndef ARPHRD_AX25
+#define ARPHRD_AX25 3
+#endif
 
 static bool ax25_set_callsign(struct ax25callsign *c, char *str)
 {
@@ -179,6 +210,13 @@ static bool ether2ax25call(struct ax25callsign *c, uint8_t *addr)
 
 	uint32_t uh, ul;
 
+	/* special case: TAP device -> mycall */
+	if (&macaddr_tap != NULL &&
+	    !memcmp(&macaddr_tap, addr, sizeof(macaddr_tap))) {
+		*c = ax_srccall;
+		return false;
+	}
+
 	/* check local MAC address / unicast */
 	if ((addr[0] & 0x03) != 0x02)
 		return true;
@@ -202,6 +240,13 @@ static void ax25call2ether(uint8_t *addr, struct ax25callsign *c)
 #define convert_etherchr(x) (((x) - 0x40) & 0x7e)
 
 	uint32_t uh, ul;
+
+	/* special case: mycall -> TAP device */
+	if (&macaddr_tap != NULL &&
+	    !ax25_match_callsign(&ax_srccall, c)) {
+		memcpy(addr, &macaddr_tap, sizeof(macaddr_tap));
+		return;
+	}
 
 	uh = ((convert_etherchr(c->callsign[0]) << 17) |
 	      (convert_etherchr(c->callsign[1]) << 11) |
@@ -246,42 +291,57 @@ fin:
 	printf("%s\n", tmp);
 }
 
-static bool ether_bcast(struct ether_header *h)
+static int encode_arp_packet(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
 {
-	int i;
+	struct kissheader *k = (struct kissheader *)exbuf;
+	struct arphdr_ether *src;
+	struct arphdr_ax25 *dst;
 
-	for (i = 0; i < sizeof(h->ether_dhost); i++)
-		if (h->ether_dhost[i] != 0xff) return false;
+	k->h.pid = PID_ARPA_ARP;
+	header_dump(k, sizeof(*k));
 
-	return true;
+	/* remove ethernet header */
+	*buf += sizeof(struct ether_header);
+	*len -= sizeof(struct ether_header);
+	if (*len < sizeof(*src))
+		goto discard;
+
+	src = (struct arphdr_ether *)*buf;
+	if (src->h.ar_hrd != htons(ARPHRD_ETHER) ||
+	    src->h.ar_pro != htons(PROTO_INET) ||
+	    src->h.ar_hln != sizeof(src->ar_sha) ||
+	    src->h.ar_pln != sizeof(src->ar_spa))
+		goto discard;
+
+	/* add translated arp packet after KISS header */
+	dst = (struct arphdr_ax25 *)(exbuf + sizeof(*k));
+	dst->h.ar_hrd = htons(ARPHRD_AX25);
+	dst->h.ar_pro = htons(PID_ARPA_IP);
+	dst->h.ar_hln = sizeof(dst->ar_sha);
+	dst->h.ar_pln = sizeof(dst->ar_spa);
+	dst->h.ar_op = src->h.ar_op;
+	dst->ar_spa = src->ar_spa;
+	dst->ar_tpa = src->ar_tpa;
+	if (!memcmp(&src->ar_sha, &macaddr_any, sizeof(src->ar_sha)) ||
+	    ether2ax25call(&dst->ar_sha, src->ar_sha.ether_addr_octet))
+		memset(&dst->ar_sha, 0, sizeof(dst->ar_sha));
+	if (!memcmp(&src->ar_tha, &macaddr_any, sizeof(src->ar_tha)) ||
+	    ether2ax25call(&dst->ar_tha, src->ar_tha.ether_addr_octet))
+		memset(&dst->ar_tha, 0, sizeof(dst->ar_sha));
+
+	/* discard original packet */
+	*len = 0;
+
+	return sizeof(*k) + sizeof(*dst);
+discard:
+	return -1;
 }
 
-int ext_encode(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
+static int encode_ip_packet(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
 {
-	struct ether_header *h = (struct ether_header *)*buf;
 	struct kissheader *k = (struct kissheader *)exbuf;
 
-	if (*len < sizeof(*h) || exlen < sizeof(*k))
-		goto discard;
-
-	/* XXX IPv4 only */
-	switch (ntohs(h->ether_type)) {
-	case PROTO_INET:
-		break;
-	default:
-		goto discard;
-	}
-
-	k->command = 0;
-	if (ether_bcast(h))
-		k->h.dst = ax_bcastcall;
-	else if (ether2ax25call(&k->h.dst, h->ether_dhost))
-		goto discard;
-	k->h.src = ax_srccall;
-	k->h.src.ssid |= 0x01; /* end of address field */
-	k->h.control = CONTROL_UI;
 	k->h.pid = PID_ARPA_IP;
-
 	header_dump(k, sizeof(*k));
 
 	/* discard ethernet header */
@@ -289,6 +349,106 @@ int ext_encode(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
 	*len -= sizeof(struct ether_header);
 
 	return sizeof(*k);
+}
+
+int ext_encode(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
+{
+	struct ether_header *h = (struct ether_header *)*buf;
+	struct kissheader *k = (struct kissheader *)exbuf;
+
+	if (*len < sizeof(*h) ||
+	    exlen < (sizeof(*k) + sizeof(struct arphdr_ax25)))
+		goto discard;
+
+	k->command = 0;
+	if (!memcmp(h->ether_dhost, &macaddr_bcast, sizeof(h->ether_dhost)))
+		k->h.dst = ax_bcastcall;
+	else if (ether2ax25call(&k->h.dst, h->ether_dhost))
+		goto discard;
+	k->h.src = ax_srccall;
+	k->h.src.ssid |= 0x01; /* end of address field */
+	k->h.control = CONTROL_UI;
+
+	/* XXX IPv4 only */
+	switch (ntohs(h->ether_type)) {
+	case PROTO_ARP:
+		return encode_arp_packet(buf, len, exbuf, exlen);
+	case PROTO_INET:
+		return encode_ip_packet(buf, len, exbuf, exlen);
+	default:
+		goto discard;
+	}
+discard:
+	return -1;
+}
+
+static int decode_arp_packet(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
+{
+	struct ether_header *h = (struct ether_header *)exbuf;
+	struct arphdr_ax25 *src;
+	struct arphdr_ether *dst;
+
+	h->ether_type = htons(PROTO_ARP);
+
+	/* remove KISS header */
+	*buf += sizeof(struct kissheader);
+	*len -= sizeof(struct kissheader);
+	if (*len < sizeof(*src))
+		goto discard;
+	
+	src = (struct arphdr_ax25 *)*buf;
+	if (src->h.ar_hrd != htons(ARPHRD_AX25) ||
+	    src->h.ar_pro != htons(PID_ARPA_IP) ||
+	    src->h.ar_hln != sizeof(src->ar_sha) ||
+	    src->h.ar_pln != sizeof(src->ar_spa))
+		goto discard;
+
+	/* add translated arp packet after ethernet header */
+	dst = (struct arphdr_ether *)(exbuf + sizeof(*h));
+	dst->h.ar_hrd = htons(ARPHRD_ETHER);
+	dst->h.ar_pro = htons(PROTO_INET);
+	dst->h.ar_hln = sizeof(dst->ar_sha);
+	dst->h.ar_pln = sizeof(dst->ar_spa);
+	dst->h.ar_op = src->h.ar_op;
+	dst->ar_spa = src->ar_spa;
+	dst->ar_tpa = src->ar_tpa;
+	if (!memcmp(&src->ar_sha, &ax_blank, sizeof(src->ar_sha)))
+		memset(&dst->ar_sha, 0, sizeof(dst->ar_sha));
+	else
+		ax25call2ether(dst->ar_sha.ether_addr_octet, &src->ar_sha);
+	if (!memcmp(&src->ar_tha, &ax_blank, sizeof(src->ar_tha)))
+		memset(&dst->ar_tha, 0, sizeof(dst->ar_tha));
+	else
+		ax25call2ether(dst->ar_tha.ether_addr_octet, &src->ar_tha);
+
+	/* discard original packet */
+	*len = 0;
+
+	return sizeof(*h) + sizeof(*dst);
+discard:
+	return -1;
+}
+
+static int decode_ip_packet(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
+{
+	struct ether_header *h = (struct ether_header *)exbuf;
+
+	/* remove KISS header */
+	*buf += sizeof(struct kissheader);
+	*len -= sizeof(struct kissheader);
+	if (*len < 1)
+		goto discard;
+
+	/* XXX IPv4 only */
+	switch (**buf >> 4) {
+	case 4:
+		h->ether_type = htons(PROTO_INET);
+		break;
+	default:
+		goto discard;
+	}
+
+	return sizeof(*h);
 discard:
 	return -1;
 }
@@ -300,37 +460,27 @@ int ext_decode(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
 
 	header_dump(k, *len);
 
-	/* check header size */
-	if (exlen < sizeof(*h) || *len < (sizeof(*k) + 1) ||
-	    ax25_check_address_field(&k->h))
+	if (exlen < (sizeof(*h) + sizeof(struct arphdr_ether)) ||
+	    *len < sizeof(*k) || ax25_check_address_field(&k->h))
 		goto discard;
 
-	/* check params */
-	if (k->command != 0 ||
-	    k->h.control != CONTROL_UI || k->h.pid != PID_ARPA_IP)
+	if (k->command != 0 || k->h.control != CONTROL_UI)
 		goto discard;
 
-	/* remove KISS header */
-	*buf += sizeof(*k);
-	*len -= sizeof(*k);
-
-	/* XXX IPv4 only */
-	switch (**buf >> 4) {
-	case 4:
-		h->ether_type = htons(PROTO_INET);
-		break;
-	default:
-		goto discard;
-	}
-
-	/* set ethernet address */
 	ax25call2ether(h->ether_shost, &k->h.src);
 	if (!ax25_match_callsign(&ax_bcastcall, &k->h.dst))
 		memset(h->ether_dhost, 0xff, sizeof(h->ether_dhost));
 	else
 		memcpy(h->ether_dhost, &macaddr_tap, sizeof(h->ether_dhost));
 
-	return sizeof(*h);
+	switch (k->h.pid) {
+	case PID_ARPA_ARP:
+		return decode_arp_packet(buf, len, exbuf, exlen);
+	case PID_ARPA_IP:
+		return decode_ip_packet(buf, len, exbuf, exlen);
+	default:
+		goto discard;
+	}
 discard:
 	return -1;
 }
@@ -364,7 +514,6 @@ bool ext_init(int argc, char *argv[])
 	if (src)
 		goto fail;
 
-	printf("KISS extension enabled\n");
 	return false;
 fail:
 	printf("usage: -xs[src]\n");
