@@ -32,6 +32,7 @@
 #endif
 
 static uint8_t etheraddr_0th_octet = 0xfe;
+static bool noarp_dec = false;
 
 struct ax25callsign {
 	uint8_t callsign[6];
@@ -210,13 +211,6 @@ static bool ether2ax25call(struct ax25callsign *c, uint8_t *addr)
 
 	uint32_t uh, ul;
 
-	/* special case: TAP device -> mycall */
-	if (&macaddr_tap != NULL &&
-	    !memcmp(&macaddr_tap, addr, sizeof(macaddr_tap))) {
-		*c = ax_srccall;
-		return false;
-	}
-
 	/* check local MAC address / unicast */
 	if ((addr[0] & 0x03) != 0x02)
 		return true;
@@ -240,13 +234,6 @@ static void ax25call2ether(uint8_t *addr, struct ax25callsign *c)
 #define convert_etherchr(x) (((x) - 0x40) & 0x7e)
 
 	uint32_t uh, ul;
-
-	/* special case: mycall -> TAP device */
-	if (&macaddr_tap != NULL &&
-	    !ax25_match_callsign(&ax_srccall, c)) {
-		memcpy(addr, &macaddr_tap, sizeof(macaddr_tap));
-		return;
-	}
 
 	uh = ((convert_etherchr(c->callsign[0]) << 17) |
 	      (convert_etherchr(c->callsign[1]) << 11) |
@@ -291,6 +278,24 @@ fin:
 	printf("%s\n", tmp);
 }
 
+static bool encode_axcall(struct ax25callsign *c, uint8_t *addr)
+{
+	if (!memcmp(addr, &macaddr_tap, sizeof(macaddr_tap))) {
+		/* my call */
+		*c = ax_srccall;
+	} else if (!memcmp(addr, &macaddr_bcast, sizeof(macaddr_bcast))) {
+		/* broadcast */
+		*c = ax_bcastcall;
+	} else if (!memcmp(addr, &macaddr_any, sizeof(macaddr_any)) ||
+		   ether2ax25call(c, addr)) {
+		/* ARP (0x00 addr) or convert error */
+		*c = ax_blank;
+		return true;
+	}
+
+	return false;
+}
+
 static int encode_arp_packet(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
 {
 	struct kissheader *k = (struct kissheader *)exbuf;
@@ -322,12 +327,8 @@ static int encode_arp_packet(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
 	dst->h.ar_op = src->h.ar_op;
 	dst->ar_spa = src->ar_spa;
 	dst->ar_tpa = src->ar_tpa;
-	if (!memcmp(&src->ar_sha, &macaddr_any, sizeof(src->ar_sha)) ||
-	    ether2ax25call(&dst->ar_sha, src->ar_sha.ether_addr_octet))
-		memset(&dst->ar_sha, 0, sizeof(dst->ar_sha));
-	if (!memcmp(&src->ar_tha, &macaddr_any, sizeof(src->ar_tha)) ||
-	    ether2ax25call(&dst->ar_tha, src->ar_tha.ether_addr_octet))
-		memset(&dst->ar_tha, 0, sizeof(dst->ar_sha));
+	encode_axcall(&dst->ar_sha, src->ar_sha.ether_addr_octet);
+	encode_axcall(&dst->ar_tha, src->ar_tha.ether_addr_octet);
 
 	/* discard original packet */
 	*len = 0;
@@ -361,11 +362,9 @@ int ext_encode(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
 		goto discard;
 
 	k->command = 0;
-	if (!memcmp(h->ether_dhost, &macaddr_bcast, sizeof(h->ether_dhost)))
-		k->h.dst = ax_bcastcall;
-	else if (ether2ax25call(&k->h.dst, h->ether_dhost))
+	if (encode_axcall(&k->h.dst, h->ether_dhost) ||
+	    encode_axcall(&k->h.src, h->ether_shost))
 		goto discard;
-	k->h.src = ax_srccall;
 	k->h.src.ssid |= 0x01; /* end of address field */
 	k->h.control = CONTROL_UI;
 
@@ -380,6 +379,26 @@ int ext_encode(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
 	}
 discard:
 	return -1;
+}
+
+static void decode_macaddr(uint8_t *addr, struct ax25callsign *c1, struct ax25callsign *c2)
+{
+	if (!ax25_match_callsign(c1, &ax_srccall)) {
+		/* my call */
+		memcpy(addr, &macaddr_tap, sizeof(macaddr_tap));
+	} else if (!ax25_match_callsign(c1, &ax_bcastcall)) {
+		/* broadcast */
+		memcpy(addr, &macaddr_bcast, sizeof(macaddr_bcast));
+	} else if (!memcmp(c1, &ax_blank, sizeof(ax_blank))) {
+		/* special case(1): ARP uses blank (0x00) addr */
+		memcpy(addr, &macaddr_any, sizeof(macaddr_any));
+	} else if (noarp_dec && c2 != NULL && !ax25_match_callsign(c1, c2)) {
+		/* special case(2): Linux uses src>src when ARP disabled */
+		memcpy(addr, &macaddr_tap, sizeof(macaddr_tap));
+	} else {
+		/* others */
+		ax25call2ether(addr, c1);
+	}
 }
 
 static int decode_arp_packet(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
@@ -412,14 +431,10 @@ static int decode_arp_packet(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
 	dst->h.ar_op = src->h.ar_op;
 	dst->ar_spa = src->ar_spa;
 	dst->ar_tpa = src->ar_tpa;
-	if (!memcmp(&src->ar_sha, &ax_blank, sizeof(src->ar_sha)))
-		memset(&dst->ar_sha, 0, sizeof(dst->ar_sha));
-	else
-		ax25call2ether(dst->ar_sha.ether_addr_octet, &src->ar_sha);
-	if (!memcmp(&src->ar_tha, &ax_blank, sizeof(src->ar_tha)))
-		memset(&dst->ar_tha, 0, sizeof(dst->ar_tha));
-	else
-		ax25call2ether(dst->ar_tha.ether_addr_octet, &src->ar_tha);
+	decode_macaddr((uint8_t *)&dst->ar_sha.ether_addr_octet,
+		       &src->ar_sha, NULL);
+	decode_macaddr((uint8_t *)&dst->ar_tha.ether_addr_octet,
+		       &src->ar_tha, NULL);
 
 	/* discard original packet */
 	*len = 0;
@@ -467,11 +482,8 @@ int ext_decode(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
 	if (k->command != 0 || k->h.control != CONTROL_UI)
 		goto discard;
 
-	ax25call2ether(h->ether_shost, &k->h.src);
-	if (!ax25_match_callsign(&ax_bcastcall, &k->h.dst))
-		memset(h->ether_dhost, 0xff, sizeof(h->ether_dhost));
-	else
-		memcpy(h->ether_dhost, &macaddr_tap, sizeof(h->ether_dhost));
+	decode_macaddr(h->ether_shost, &k->h.src, NULL);
+	decode_macaddr(h->ether_dhost, &k->h.dst, &k->h.src);
 
 	switch (k->h.pid) {
 	case PID_ARPA_ARP:
@@ -505,6 +517,9 @@ bool ext_init(int argc, char *argv[])
 		case 'o':
 			etheraddr_0th_octet =
 				(strtol(&argv[i][1], NULL, 0) & 0xfc) | 0x02;
+			break;
+		case 'n':
+			noarp_dec = true;
 			break;
 		default:
 			goto fail;
