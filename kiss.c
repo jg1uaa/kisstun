@@ -12,7 +12,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
+#include <time.h>
+#include <sys/types.h>
+#include <sys/time.h>
 #include <sys/socket.h>
 #include <net/if_arp.h>
 #include <netinet/in.h>
@@ -33,6 +35,7 @@
 
 static uint8_t etheraddr_0th_octet = 0xfe;
 static bool noarp_dec = false;
+static uint8_t loglevel = ~0;
 
 struct ax25callsign {
 	uint8_t callsign[6];
@@ -247,25 +250,42 @@ static void ax25call2ether(uint8_t *addr, struct ax25callsign *c)
 
 static void header_dump(struct kissheader *k, int len)
 {
-	char tmp[256], *p;
 	int i;
+	char tmp[128], *p;
+	struct timeval tv;
+	struct tm *tm;
+
+	if (loglevel < 1)
+		return;
+
+	gettimeofday(&tv, NULL);
+	tm = localtime(&tv.tv_sec);
 
 	p = tmp;
-	len = (len < sizeof(*k)) ? len : sizeof(*k);
+	p += sprintf(p, "%04d-%02d-%02d %02d:%02d:%02d.%03d ",
+		     tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
+		     tm->tm_hour, tm->tm_min, tm->tm_sec,
+		     (int)(tv.tv_usec / 1000));
 
-	/* hex dump */
-	for (i = 0; i < len; i++)
-		p += sprintf(p, "%02X ", ((uint8_t *)k)[i]);
-	if (len < sizeof(*k))
+	/* bad header: simply dump hex value */
+	if (len < sizeof(*k) || ax25_check_address_field(&k->h)) {
+		len = (len < sizeof(*k)) ? len : sizeof(*k);
+
+		for (i = 0; i < len; i++)
+			p += sprintf(p, "%02X ", ((uint8_t *)k)[i]);
 		goto fin;
+	}
+
+	if (loglevel < 2)
+		return;
 
 	/* kiss header dump */
-	p += sprintf(p, "cmd=%#x ", k->command);
+	p += sprintf(p, "cmd=0x%02x ctl=0x%02x pid=0x%02x ",
+		     k->command, k->h.control, k->h.pid);
 	p += ax25_get_callsign(&k->h.src, p, 10);
 	*p++ = '>';
 	p += ax25_get_callsign(&k->h.dst, p, 10);
-	*p++ = ' ';
-	p += sprintf(p, "ctl=%#x pid=%#x", k->h.control, k->h.pid);
+
 fin:
 	printf("%s\n", tmp);
 }
@@ -513,6 +533,9 @@ bool ext_init(int argc, char *argv[])
 			break;
 		case 'n':
 			noarp_dec = true;
+			break;
+		case 'q':
+			loglevel = strtol(&argv[i][1], NULL, 0);
 			break;
 		default:
 			goto fail;
