@@ -205,15 +205,11 @@ static int ax25_get_callsign(struct ax25callsign *c, char *str, int len)
  * Compatibility for normal ethernet system, "lm" bits are "10" for
  * local MAC address and unicast. "r" bits are still 1, but don't care.
  */
-static bool ether2ax25call(struct ax25callsign *c, uint8_t *addr)
+static void ether2ax25call(struct ax25callsign *c, uint8_t *addr)
 {
 #define convert_ax25chr(x) (((x) & 0x7e) + 0x40)
 
 	uint32_t uh, ul;
-
-	/* check local MAC address / unicast */
-	if ((addr[0] & 0x03) != 0x02)
-		return true;
 
 	uh = (addr[1] << 16) | (addr[2] << 8) | addr[3];
 	ul = (addr[4] << 8) | addr[5];
@@ -225,8 +221,6 @@ static bool ether2ax25call(struct ax25callsign *c, uint8_t *addr)
 	c->callsign[4] = convert_ax25chr(ul >> 9);
 	c->callsign[5] = convert_ax25chr(ul >> 3);
 	c->ssid = (ul << 1) & 0x1e;
-
-	return false;
 }
 
 static void ax25call2ether(uint8_t *addr, struct ax25callsign *c)
@@ -249,8 +243,6 @@ static void ax25call2ether(uint8_t *addr, struct ax25callsign *c)
 	addr[3] = uh;
 	addr[4] = ul >> 8;
 	addr[5] = ul;
-
-	return;
 }
 
 static void header_dump(struct kissheader *k, int len)
@@ -278,7 +270,7 @@ fin:
 	printf("%s\n", tmp);
 }
 
-static bool encode_axcall(struct ax25callsign *c, uint8_t *addr)
+static void encode_axcall(struct ax25callsign *c, uint8_t *addr)
 {
 	if (!memcmp(addr, &macaddr_tap, sizeof(macaddr_tap))) {
 		/* my call */
@@ -286,14 +278,16 @@ static bool encode_axcall(struct ax25callsign *c, uint8_t *addr)
 	} else if (!memcmp(addr, &macaddr_bcast, sizeof(macaddr_bcast))) {
 		/* broadcast */
 		*c = ax_bcastcall;
-	} else if (!memcmp(addr, &macaddr_any, sizeof(macaddr_any)) ||
-		   ether2ax25call(c, addr)) {
-		/* ARP (0x00 addr) or convert error */
+	} else if (addr[0] & 0x01) {
+		/* XXX multicast - treat as broadcast */
+		*c = ax_bcastcall;
+	} else if (!memcmp(addr, &macaddr_any, sizeof(macaddr_any))) {
+		/* special case: ARP uses blank (0x00) addr */
 		*c = ax_blank;
-		return true;
+	} else {
+		/* others */
+		ether2ax25call(c, addr);
 	}
-
-	return false;
 }
 
 static int encode_arp_packet(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
@@ -362,9 +356,8 @@ int ext_encode(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
 		goto discard;
 
 	k->command = 0;
-	if (encode_axcall(&k->h.dst, h->ether_dhost) ||
-	    encode_axcall(&k->h.src, h->ether_shost))
-		goto discard;
+	encode_axcall(&k->h.dst, h->ether_dhost);
+	encode_axcall(&k->h.src, h->ether_shost);
 	k->h.src.ssid |= 0x01; /* end of address field */
 	k->h.control = CONTROL_UI;
 
@@ -551,13 +544,8 @@ fin:
 
 int decode_callsign(uint8_t *addr, char *str, int len)
 {
-	int ret = -1;
 	struct ax25callsign tmp;
 	
-	if (ether2ax25call(&tmp, addr))
-		goto fin;
-
-	ret = ax25_get_callsign(&tmp, str, len);
-fin:
-	return ret;
+	ether2ax25call(&tmp, addr);
+	return ax25_get_callsign(&tmp, str, len);
 }
