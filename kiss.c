@@ -341,8 +341,8 @@ static int encode_arp_packet(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
 	dst->h.ar_op = src->h.ar_op;
 	dst->ar_spa = src->ar_spa;
 	dst->ar_tpa = src->ar_tpa;
-	encode_axcall(&dst->ar_sha, src->ar_sha.ether_addr_octet);
-	encode_axcall(&dst->ar_tha, src->ar_tha.ether_addr_octet);
+	encode_axcall(&dst->ar_sha, (uint8_t *)&src->ar_sha);
+	encode_axcall(&dst->ar_tha, (uint8_t *)&src->ar_tha);
 
 	/* discard original packet */
 	*len = 0;
@@ -444,10 +444,8 @@ static int decode_arp_packet(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
 	dst->h.ar_op = src->h.ar_op;
 	dst->ar_spa = src->ar_spa;
 	dst->ar_tpa = src->ar_tpa;
-	decode_macaddr((uint8_t *)&dst->ar_sha.ether_addr_octet,
-		       &src->ar_sha, NULL);
-	decode_macaddr((uint8_t *)&dst->ar_tha.ether_addr_octet,
-		       &src->ar_tha, NULL);
+	decode_macaddr((uint8_t *)&dst->ar_sha, &src->ar_sha, NULL);
+	decode_macaddr((uint8_t *)&dst->ar_tha, &src->ar_tha, NULL);
 
 	/* discard original packet */
 	*len = 0;
