@@ -35,6 +35,7 @@
 
 static uint8_t etheraddr_0th_octet = 0xfe;
 static bool noarp_dec = false;
+static bool mcast_encode = false;
 static uint8_t loglevel = ~0;
 
 struct ax25callsign {
@@ -372,6 +373,20 @@ static int encode_ip_packet(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
 	return sizeof(*k);
 }
 
+static bool mcast_check(uint8_t *addr)
+{
+	if (!(addr[0] & 0x01)) {
+		/* unicast */
+		return false;
+	} else if (!memcmp(addr, &macaddr_bcast, sizeof(macaddr_bcast))) {
+		/* broadcast */
+		return false;
+	} else {
+		/* multicast */
+		return !mcast_encode;
+	}
+}
+
 int ext_encode(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
 {
 	struct ether_header *h = (struct ether_header *)*buf;
@@ -379,6 +394,9 @@ int ext_encode(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
 
 	if (*len < sizeof(*h) ||
 	    exlen < (sizeof(*k) + sizeof(struct arphdr_ax25)))
+		goto discard;
+
+	if (mcast_check(h->ether_dhost))
 		goto discard;
 
 	k->command = 0;
@@ -540,6 +558,9 @@ bool ext_init(int argc, char *argv[])
 			break;
 		case 'q':
 			loglevel = strtol(&argv[i][1], NULL, 0);
+			break;
+		case 'm':
+			mcast_encode = (argv[i][1] == 'a');
 			break;
 		default:
 			goto fail;
