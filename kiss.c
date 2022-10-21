@@ -35,7 +35,7 @@
 
 static uint8_t etheraddr_0th_octet = 0xfe;
 static bool noarp_dec = false;
-static bool mcast_encode = false;
+static bool mcast_encode = false, mcast_ext = false;
 static uint8_t loglevel = ~0;
 
 struct ax25callsign {
@@ -297,6 +297,31 @@ fin:
 	printf("%s\n", tmp);
 }
 
+/*
+ * Multicast address encoded callsign:
+ *
+ * Encode/decode well-used multicast MAC address using ether2ax25call()
+ * and ax25call2ether() functions. These functions do not care 0th octet;
+ *
+ *     zz:33:xx:xx:xx:xx (callsign starts ,P to ,_)
+ *     zz:00:5e:xx:xx:xx (callsign starts `%X to `%[)
+ *
+ * Multicast MAC address encoded callsigns have !isalnum() characters
+ * and easy to guess 0th octet by first character of callsign.
+ * 
+ * To clear the callsign is used as multicast MAC address,
+ * replace space(0x20) to backquote(0x60).
+ */
+static void ax25call_mcastenc(struct ax25callsign *c)
+{
+	int i;
+
+	for (i = 0; i < sizeof(c->callsign); i++) {
+		if (c->callsign[i] == encode_addr_char(' '))
+			c->callsign[i] = encode_addr_char('`');
+	}
+}
+
 static void encode_axcall(struct ax25callsign *c, uint8_t *addr)
 {
 	if (!memcmp(addr, &macaddr_tap, sizeof(macaddr_tap))) {
@@ -306,8 +331,16 @@ static void encode_axcall(struct ax25callsign *c, uint8_t *addr)
 		/* broadcast */
 		*c = ax_bcastcall;
 	} else if (addr[0] & 0x01) {
-		/* XXX multicast - treat as broadcast */
-		*c = ax_bcastcall;
+		/* multicast */
+		if (mcast_ext &&
+		    ((addr[0] == 0x33 && addr[1] == 0x33) ||
+		     (addr[0] == 0x01 && addr[1] == 0x00 && addr[2] == 0x5e))) {
+			ether2ax25call(c, addr);
+			ax25call_mcastenc(c);
+		} else {
+			/* treat as broadcast */
+			*c = ax_bcastcall;
+		}
 	} else if (!memcmp(addr, &macaddr_any, sizeof(macaddr_any))) {
 		/* special case: ARP uses blank (0x00) addr */
 		*c = ax_blank;
@@ -435,6 +468,18 @@ static void decode_macaddr(uint8_t *addr, struct ax25callsign *c1, struct ax25ca
 	} else {
 		/* others */
 		ax25call2ether(addr, c1);
+
+		/* multicast */
+		if (mcast_encode && mcast_ext) {
+			switch (c1->callsign[0]) {
+			case encode_addr_char('`'):
+				addr[0] = 0x01;
+				break;
+			case encode_addr_char(','):
+				addr[0] = 0x33;
+				break;
+			}
+		}
 	}
 }
 
@@ -560,7 +605,16 @@ bool ext_init(int argc, char *argv[])
 			loglevel = strtol(&argv[i][1], NULL, 0);
 			break;
 		case 'm':
-			mcast_encode = (argv[i][1] == 'a');
+			switch (argv[i][1]) {
+			case 'a':
+				mcast_encode = true;
+				break;
+			case 'x':
+				mcast_ext = true;
+				break;
+			default:
+				goto fail;
+			}
 			break;
 		default:
 			goto fail;
