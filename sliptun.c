@@ -54,7 +54,7 @@ static char *tundev = NULL;
 static bool rtscts = false;
 struct ether_addr macaddr_tap;
 
-#define EXTARG_MAX 8
+#define EXTARG_MAX 16
 static int extargc = 0;
 static char *extargv[EXTARG_MAX + 1] = {NULL};
 
