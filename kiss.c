@@ -18,10 +18,13 @@
 #include <sys/socket.h>
 #include <net/if_arp.h>
 #include <netinet/in.h>
+#include <netinet/ip6.h>
+#include <netinet/icmp6.h>
 #include <netinet/if_ether.h>
 #if defined(__linux__)
 #include <linux/if.h>
 #define PROTO_INET ETH_P_IP
+#define PROTO_INET6 ETH_P_IPV6
 #define PROTO_ARP ETH_P_ARP
 #else
 #if defined(__OpenBSD__) || defined(__NetBSD__)
@@ -30,12 +33,14 @@
 #include <net/ethernet.h>
 #endif
 #define PROTO_INET ETHERTYPE_IP
+#define PROTO_INET6 ETHERTYPE_IPV6
 #define PROTO_ARP ETHERTYPE_ARP
 #endif
 
 static uint8_t etheraddr_0th_octet = 0xfe;
 static bool noarp_dec = false;
 static bool mcast_encode = false, mcast_ext = false;
+static bool use_ipv6 = false;
 static uint8_t loglevel = ~0;
 
 struct ax25callsign {
@@ -392,9 +397,16 @@ discard:
 	return -1;
 }
 
+static int icmpv6_handler(uint8_t **buf, int *len, uint8_t *exbuf, int exlen, int expos, bool encode)
+{
+	/* not yet */
+	return -1;
+}
+
 static int encode_ip_packet(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
 {
 	struct kissheader *k = (struct kissheader *)exbuf;
+	struct ip6_hdr *ip6;
 
 	k->h.pid = PID_ARPA_IP;
 	header_dump(k, sizeof(*k));
@@ -402,8 +414,24 @@ static int encode_ip_packet(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
 	/* discard ethernet header */
 	*buf += sizeof(struct ether_header);
 	*len -= sizeof(struct ether_header);
+	if (*len < 1)
+		goto discard;
 
-	return sizeof(*k);
+	switch (**buf >> 4) {
+	case 4:
+		return sizeof(*k);
+	case 6:
+		if (!use_ipv6 || *len < sizeof(*ip6))
+			goto discard;
+		ip6 = (struct ip6_hdr *)*buf;
+		return (ip6->ip6_ctlun.ip6_un1.ip6_un1_nxt == IPPROTO_ICMPV6) ?
+			icmpv6_handler(buf, len, exbuf, exlen,
+				       sizeof(*k), true) : sizeof(*k);
+	default:
+		goto discard;
+	}
+discard:
+	return -1;
 }
 
 static bool mcast_check(uint8_t *addr)
@@ -438,11 +466,11 @@ int ext_encode(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
 	k->h.src.ssid |= 0x01; /* end of address field */
 	k->h.control = CONTROL_UI;
 
-	/* XXX IPv4 only */
 	switch (ntohs(h->ether_type)) {
 	case PROTO_ARP:
 		return encode_arp_packet(buf, len, exbuf, exlen);
 	case PROTO_INET:
+	case PROTO_INET6:
 		return encode_ip_packet(buf, len, exbuf, exlen);
 	default:
 		goto discard;
@@ -527,6 +555,7 @@ discard:
 static int decode_ip_packet(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
 {
 	struct ether_header *h = (struct ether_header *)exbuf;
+	struct ip6_hdr *ip6;
 
 	/* remove KISS header */
 	*buf += sizeof(struct kissheader);
@@ -534,16 +563,21 @@ static int decode_ip_packet(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
 	if (*len < 1)
 		goto discard;
 
-	/* XXX IPv4 only */
 	switch (**buf >> 4) {
 	case 4:
 		h->ether_type = htons(PROTO_INET);
-		break;
+		return sizeof(*h);
+	case 6:
+		if (!use_ipv6 || *len < sizeof(*ip6))
+			goto discard;
+		h->ether_type = htons(PROTO_INET6);
+		ip6 = (struct ip6_hdr *)*buf;
+		return (ip6->ip6_ctlun.ip6_un1.ip6_un1_nxt == IPPROTO_ICMPV6) ?
+			icmpv6_handler(buf, len, exbuf, exlen,
+				       sizeof(*h), false) : sizeof(*h);
 	default:
 		goto discard;
 	}
-
-	return sizeof(*h);
 discard:
 	return -1;
 }
@@ -615,6 +649,9 @@ bool ext_init(int argc, char *argv[])
 			default:
 				goto fail;
 			}
+			break;
+		case '6':
+			use_ipv6 = true;
 			break;
 		default:
 			goto fail;
