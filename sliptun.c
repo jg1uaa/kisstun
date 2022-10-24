@@ -74,7 +74,7 @@ static bool die = false;
  * but there is no definition in Linux. 16Kbyte may be enough. 
  */
 #define BUFSIZE 16384
-#define EXBUFSIZE 128
+#define EXBUFSIZE 384
 
 #define END_CHAR 0xc0		/* indicates end of packet */
 #define ESC_CHAR 0xdb		/* indicates byte stuffing */
