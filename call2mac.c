@@ -6,7 +6,6 @@
  */
 
 #include <stdio.h>
-#include <stdint.h>
 #include <stdlib.h>
 #include <ctype.h>
 #include <unistd.h>
@@ -14,15 +13,35 @@
 #include <net/if_arp.h>
 #include <netinet/in.h>
 #include <netinet/if_ether.h>
+#include "ax25.h"
 
 extern char *optarg;
-static uint8_t etheraddr_0th_octet = 0xfe;
+extern uint8_t etheraddr_0th_octet;
 enum mode {
 	NONE, ENCODE, DECODE,
 };
 
-int encode_etheraddr(char *str, uint8_t *addr);
-int decode_callsign(uint8_t *addr, char *str, int len);
+static int encode_etheraddr(char *str, uint8_t *addr)
+{
+	int ret = -1;
+	struct ax25callsign tmp;
+
+	if (ax25_set_callsign(&tmp, str))
+		goto fin;
+
+	ax25call2ether(addr, &tmp);
+	ret = 0;
+fin:
+	return ret;
+}
+
+static int decode_callsign(uint8_t *addr, char *str, int len)
+{
+	struct ax25callsign tmp;
+
+	ether2ax25call(&tmp, addr);
+	return ax25_get_callsign(&tmp, str, len);
+}
 
 static void encode(char *call)
 {
@@ -33,8 +52,6 @@ static void encode(char *call)
 		fprintf(stderr, "invalid callsign\n");
 		return;
 	}
-
-	addr[0] = etheraddr_0th_octet;
 
 	fprintf(stdout, "%02X:%02X:%02X:%02X:%02X:%02X\n",
 		addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
