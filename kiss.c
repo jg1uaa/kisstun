@@ -489,12 +489,74 @@ static uint16_t calc_icmpv6_checksum(uint8_t *buf)
 	return (uint16_t)(0xffff - (sum >> 16));
 }
 
-static int translate_icmpv6_option(uint8_t *in, int insize, uint8_t *out, int outsize, bool encode)
+static int encode_icmpv6_option(uint8_t **in, int *insize, uint8_t **out, int *outsize)
 {
 	struct nd_opt_linkaddr_ether *opt_ether;
 	struct nd_opt_linkaddr_ax25 *opt_ax25;
+
+	opt_ether = (struct nd_opt_linkaddr_ether *)*in;
+	opt_ax25 = (struct nd_opt_linkaddr_ax25 *)*out;
+
+	if (*insize < sizeof(*opt_ether) || *outsize < sizeof(*opt_ax25) ||
+	    opt_ether->h.nd_opt_len != sizeof(*opt_ether) / 8)
+		return true;
+
+	encode_axcall(&opt_ax25->lladdr, (uint8_t *)&opt_ether->lladdr);
+	memset(opt_ax25->pad, 0, sizeof(opt_ax25->pad));
+	opt_ax25->h.nd_opt_type = opt_ether->h.nd_opt_type;
+	opt_ax25->h.nd_opt_len = sizeof(*opt_ax25) / 8;
+
+	*in += sizeof(*opt_ether);
+	*out += sizeof(*opt_ax25);
+	*insize -= sizeof(*opt_ether);
+	*outsize -= sizeof(*opt_ax25);
+
+	return false;
+}
+
+static int decode_icmpv6_option(uint8_t **in, int *insize, uint8_t **out, int *outsize)
+{
+	struct nd_opt_linkaddr_ether *opt_ether;
+	struct nd_opt_linkaddr_ax25 *opt_ax25;
+
+	opt_ax25 = (struct nd_opt_linkaddr_ax25 *)*in;
+	opt_ether = (struct nd_opt_linkaddr_ether *)*out;
+
+	if (*insize < sizeof(*opt_ax25) || *outsize < sizeof(*opt_ether) ||
+	    opt_ax25->h.nd_opt_len != sizeof(*opt_ax25) / 8)
+		return true;
+
+	decode_macaddr((uint8_t *)&opt_ether->lladdr, &opt_ax25->lladdr, NULL);
+	opt_ether->h.nd_opt_type = opt_ax25->h.nd_opt_type;
+	opt_ether->h.nd_opt_len = sizeof(*opt_ether) / 8;
+
+	*in += sizeof(*opt_ax25);
+	*out += sizeof(*opt_ether);
+	*insize -= sizeof(*opt_ax25);
+	*outsize -= sizeof(*opt_ether);
+
+	return false;
+}
+static bool pass_icmpv6_option(uint8_t **in, int *insize, uint8_t **out, int *outsize)
+{
+	struct nd_opt_hdr *h = (struct nd_opt_hdr *)*in;
+	const int size = h->nd_opt_len * 8;
+
+	if (*insize < size || *outsize < size)
+		return true;
+
+	memcpy(*out, *in, size);
+	*in += size;
+	*out += size;
+	*insize -= size;
+	*outsize -= size;
+
+	return false;
+}
+
+static int translate_icmpv6_option(uint8_t *in, int insize, uint8_t *out, int outsize, bool encode)
+{
 	struct nd_opt_hdr *h;
-	int size;
 	const int outsize0 = outsize;
 
 	while (insize > 0) {
@@ -505,57 +567,14 @@ static int translate_icmpv6_option(uint8_t *in, int insize, uint8_t *out, int ou
 		switch (h->nd_opt_type) {
 		case ND_OPT_SOURCE_LINKADDR:
 		case ND_OPT_TARGET_LINKADDR:
-			if (encode) {
-				opt_ether = (struct nd_opt_linkaddr_ether *)in;
-				opt_ax25 = (struct nd_opt_linkaddr_ax25 *)out;
-				if (insize < sizeof(*opt_ether) ||
-				    outsize < sizeof(*opt_ax25) ||
-				    opt_ether->h.nd_opt_len !=
-				    sizeof(*opt_ether) / 8)
-					goto error;
-
-				encode_axcall(&opt_ax25->lladdr,
-					      (uint8_t *)&opt_ether->lladdr);
-				opt_ax25->h.nd_opt_type =
-					opt_ether->h.nd_opt_type;
-				opt_ax25->h.nd_opt_len =
-					sizeof(*opt_ax25) / 8;
-
-				in += sizeof(*opt_ether);
-				out += sizeof(*opt_ax25);
-				insize -= sizeof(*opt_ether);
-				outsize -= sizeof(*opt_ax25);
-			} else {
-				opt_ax25 = (struct nd_opt_linkaddr_ax25 *)in;
-				opt_ether = (struct nd_opt_linkaddr_ether *)out;
-				if (insize < sizeof(*opt_ax25) ||
-				    outsize < sizeof(*opt_ether) ||
-				    opt_ax25->h.nd_opt_len !=
-				    sizeof(*opt_ax25) / 8)
-					goto error;
-
-				decode_macaddr((uint8_t *)&opt_ether->lladdr,
-					       &opt_ax25->lladdr, NULL);
-				opt_ether->h.nd_opt_type =
-					opt_ax25->h.nd_opt_type;
-				opt_ether->h.nd_opt_len =
-					sizeof(*opt_ether) / 8;
-
-				in += sizeof(*opt_ax25);
-				out += sizeof(*opt_ether);
-				insize -= sizeof(*opt_ax25);
-				outsize -= sizeof(*opt_ether);
-			}
+			if (encode ?
+			    encode_icmpv6_option(&in, &insize, &out, &outsize) :
+			    decode_icmpv6_option(&in, &insize, &out, &outsize))
+				goto error;
 			break;
 		default:
-			size = h->nd_opt_len * 8;
-			if (insize < size || outsize < size)
+			if (pass_icmpv6_option(&in, &insize, &out, &outsize))
 				goto error;
-			memcpy(out, in, size);
-			in += size;
-			out += size;
-			insize -= size;
-			outsize -= size;
 			break;
 		}
 	}
@@ -580,9 +599,6 @@ static int icmpv6_handler(uint8_t **buf, int *len, uint8_t *exbuf, int exlen, in
 	 * expos: used size of work buffer
 	 * encode: true(ether->AX25) false(AX25->ether)
 	 */
-
-	if (*len < sizeof(*ip6_src))
-		goto discard;
 
 	ip6_src = (struct ip6_hdr *)*buf;
 	plen = ntohs(ip6_src->ip6_ctlun.ip6_un1.ip6_un1_plen);
