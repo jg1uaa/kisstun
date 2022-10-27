@@ -16,7 +16,6 @@
 #include "ax25.h"
 
 extern char *optarg;
-extern uint8_t etheraddr_0th_octet;
 enum mode {
 	NONE, ENCODE, DECODE,
 };

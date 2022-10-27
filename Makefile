@@ -1,5 +1,5 @@
 TARGET = kisstun
-OBJ = ax25.o kiss.o sliptun.o
+OBJ = ax25.o arp.o icmpv6.o kiss.o sliptun.o
 TARGET2 = call2mac
 OBJ2 = ax25.o call2mac.o
 CFLAGS = -O2 -Wall -c -fdata-sections -ffunction-sections
@@ -8,6 +8,12 @@ LFLAGS = -Wl,--gc-sections
 all: $(TARGET) $(TARGET2)
 
 ax25.o: ax25.c
+	$(CC) $(CFLAGS) $< -o $@
+
+arp.o: arp.c
+	$(CC) $(CFLAGS) $< -o $@
+
+icmpv6.o: icmpv6.c
 	$(CC) $(CFLAGS) $< -o $@
 
 kiss.o: kiss.c

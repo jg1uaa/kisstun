@@ -40,4 +40,6 @@ int ax25_get_callsign(struct ax25callsign *c, char *str, int len);
 void ether2ax25call(struct ax25callsign *c, uint8_t *addr);
 void ax25call2ether(uint8_t *addr, struct ax25callsign *c);
 
+extern uint8_t etheraddr_0th_octet;
+
 #endif
