@@ -29,6 +29,10 @@
 #endif
 #include "ax25.h"
 
+/* log.c */
+void header_dump(struct kissheader *k, int len);
+extern uint8_t loglevel;
+
 /* kiss.c */
 void encode_axcall(struct ax25callsign *c, uint8_t *addr);
 void decode_macaddr(uint8_t *addr, struct ax25callsign *c1, struct ax25callsign *c2);
