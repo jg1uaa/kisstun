@@ -10,7 +10,7 @@
 #include "kiss.h"
 
 static bool noarp_dec = false;
-static bool mcast_encode = false, mcast_ext = false;
+static bool mcast_encode = false, mcast_ext = false, mcast_ip = false;
 static bool use_ipv6 = false;
 
 static struct ax25callsign ax_srccall, ax_bcastcall;
@@ -119,7 +119,6 @@ static int encode_ip_packet(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
 	struct ip6_hdr *ip6;
 
 	k->h.pid = PID_ARPA_IP;
-	header_dump(k, sizeof(*k));
 
 	/* discard ethernet header */
 	*buf += sizeof(struct ether_header);
@@ -129,10 +128,16 @@ static int encode_ip_packet(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
 
 	switch (**buf >> 4) {
 	case 4:
+		if (*len < IPV4_HEADER_SIZE ||
+		    (!mcast_ip && ipv4_block_mcastip(*buf)))
+			goto discard;
+		header_dump(k, sizeof(*k));
 		return sizeof(*k);
 	case 6:
-		if (!use_ipv6 || *len < sizeof(*ip6))
+		if (!use_ipv6 || *len < sizeof(*ip6) ||
+		    (!mcast_ip && ipv6_block_mcastip(*buf)))
 			goto discard;
+		header_dump(k, sizeof(*k));
 		ip6 = (struct ip6_hdr *)*buf;
 		return (ip6->ip6_ctlun.ip6_un1.ip6_un1_nxt == IPPROTO_ICMPV6) ?
 			icmpv6_handler(buf, len, exbuf, exlen,
@@ -201,10 +206,14 @@ static int decode_ip_packet(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
 
 	switch (**buf >> 4) {
 	case 4:
+		if (*len < IPV4_HEADER_SIZE ||
+		    (!mcast_ip && ipv4_block_mcastip(*buf)))
+			goto discard;
 		h->ether_type = htons(PROTO_INET);
 		return sizeof(*h);
 	case 6:
-		if (!use_ipv6 || *len < sizeof(*ip6))
+		if (!use_ipv6 || *len < sizeof(*ip6) ||
+		    (!mcast_ip && ipv6_block_mcastip(*buf)))
 			goto discard;
 		h->ether_type = htons(PROTO_INET6);
 		ip6 = (struct ip6_hdr *)*buf;
@@ -281,6 +290,9 @@ bool ext_init(int argc, char *argv[])
 				break;
 			case 'x':
 				mcast_ext = true;
+				break;
+			case 'i':
+				mcast_ip = true;
 				break;
 			default:
 				goto fail;

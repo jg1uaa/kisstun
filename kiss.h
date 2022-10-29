@@ -9,6 +9,7 @@
 #include <sys/socket.h>
 #include <net/if_arp.h>
 #include <netinet/in.h>
+#include <netinet/ip.h>
 #include <netinet/ip6.h>
 #include <netinet/icmp6.h>
 #include <netinet/if_ether.h>
@@ -17,6 +18,7 @@
 #define PROTO_INET ETH_P_IP
 #define PROTO_INET6 ETH_P_IPV6
 #define PROTO_ARP ETH_P_ARP
+#define IPV4_HEADER_SIZE sizeof(struct iphdr)
 #else
 #if defined(__OpenBSD__) || defined(__NetBSD__)
 #include <net/ethertypes.h>
@@ -26,6 +28,7 @@
 #define PROTO_INET ETHERTYPE_IP
 #define PROTO_INET6 ETHERTYPE_IPV6
 #define PROTO_ARP ETHERTYPE_ARP
+#define IPV4_HEADER_SIZE sizeof(struct ip)
 #endif
 #include "ax25.h"
 
@@ -44,5 +47,9 @@ int decode_arp_packet(uint8_t **buf, int *len, uint8_t *exbuf, int exlen);
 
 /* icmpv6.c */
 int icmpv6_handler(uint8_t **buf, int *len, uint8_t *exbuf, int exlen, int expos, bool encode);
+
+/* ipf.c */
+bool ipv4_block_mcastip(uint8_t *ip);
+bool ipv6_block_mcastip(uint8_t *ip);
 
 #endif
