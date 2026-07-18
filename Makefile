@@ -2,8 +2,8 @@ TARGET = kisstun
 OBJ = log.o ax25.o arp.o icmpv6.o ipf.o kiss.o sliptun.o
 TARGET2 = call2mac
 OBJ2 = ax25.o call2mac.o
-CFLAGS = -O2 -Wall -c -fdata-sections -ffunction-sections
-LFLAGS = -Wl,--gc-sections
+CFLAGS = -pthread -O2 -Wall -c -fdata-sections -ffunction-sections
+LFLAGS = -pthread -Wl,--gc-sections
 
 all: $(TARGET) $(TARGET2)
 
@@ -32,7 +32,7 @@ call2mac.o: call2mac.c
 	$(CC) $(CFLAGS) $< -o $@
 
 $(TARGET): $(OBJ)
-	$(CC) $(LFLAGS) -pthread $(OBJ) -o $@
+	$(CC) $(LFLAGS) $(OBJ) -o $@
 
 $(TARGET2): $(OBJ2)
 	$(CC) $(LFLAGS) $(OBJ2) -o $@
