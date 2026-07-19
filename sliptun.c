@@ -622,6 +622,7 @@ static int open_tcp_server(void)
 
 		/* nonblock is inherited from original socket (OpenBSD) */
 		if (set_nonblock(fd, false)) {
+			close(fd);
 			fd = s = -1;
 			break;
 		}
