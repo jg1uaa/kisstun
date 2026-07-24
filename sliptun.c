@@ -84,12 +84,14 @@ static bool die = false;
 
 struct encode_work {
 	int outpos;
+	bool drop;
 };
 
 struct decode_work {
 	int outpos;
 	int inpos;
 	bool esc;
+	bool drop;
 };
 
 static void set_die(bool status)
@@ -181,6 +183,8 @@ static bool decode_slip_frame(uint8_t *out, int outsize, uint8_t *in, int insize
 
 			if (w->outpos < outsize)
 				out[w->outpos++] = c;
+			else
+				w->drop = true;
 		} else {
 			switch (c) {
 			case END_CHAR:
@@ -195,6 +199,8 @@ static bool decode_slip_frame(uint8_t *out, int outsize, uint8_t *in, int insize
 			default:
 				if (w->outpos < outsize)
 					out[w->outpos++] = c;
+				else
+					w->drop = true;
 				break;
 			}
 		}
@@ -212,6 +218,7 @@ static void *do_slip_rx(__attribute__((unused)) void *arg)
 		.outpos = 0,
 		.inpos = 0,
 		.esc = false,
+		.drop = false,
 	};
 	struct iovec iov[] = {
 		{.iov_base = NULL, .iov_len = 0},
@@ -248,20 +255,23 @@ static void *do_slip_rx(__attribute__((unused)) void *arg)
 				iov[iovcnt].iov_len = n;
 				iovcnt++;
 			}
-			writev(fd_tun, iov, iovcnt);
+			if (!w.drop)
+				writev(fd_tun, iov, iovcnt);
 		next:
 			w.outpos = 0;
+			w.drop = false;
 		}
 	}
 
 fin0:
 	set_die(true);
+	close(fd_tun);
 	return NULL;
 }
 
 static void encode_slip_frame(uint8_t *out, int outsize, uint8_t *in, int insize, struct encode_work *w)
 {
-#define put_buffer(c) {if (w->outpos < outsize) out[w->outpos++] = (c);}
+#define put_buffer(c) {if (w->outpos < outsize) out[w->outpos++] = (c); else w->drop = true;}
 
 	int i;
 
@@ -307,17 +317,20 @@ static void *do_slip_tx(__attribute__((unused)) void *arg)
 			continue;
 
 		w.outpos = 0;
+		w.drop = 0;
 		encode_slip_frame(buf, sizeof(buf), NULL, 0, &w); // END_CHAR
 		if (exsize)
 			encode_slip_frame(buf, sizeof(buf), exbuf, exsize, &w);
 		if (n > 0)
 			encode_slip_frame(buf, sizeof(buf), p, n, &w);
 		encode_slip_frame(buf, sizeof(buf), NULL, 0, &w); // END_CHAR
-		write(fd_ser, buf, w.outpos);
+		if (!w.drop)
+			write(fd_ser, buf, w.outpos);
 	}
 
 fin0:
 	set_die(true);
+	close(fd_ser);
 	return NULL;
 }
 
@@ -612,9 +625,9 @@ static int open_tcp_server(void)
 			break;
 		}
 
-		strcpy(addr_str, "unknown");
-		getnameinfo((struct sockaddr *)&ss, ss_len, addr_str,
-			    sizeof(addr_str), NULL, 0, NI_NUMERICHOST);
+		if (getnameinfo((struct sockaddr *)&ss, ss_len, addr_str,
+				sizeof(addr_str), NULL, 0, NI_NUMERICHOST))
+			snprintf(addr_str, sizeof(addr_str), "unknown");
 		printf("*** CONNECTED from %s\n", addr_str);
 		break;
 	}
@@ -642,10 +655,11 @@ static int open_tcp_client(void)
 			continue;
 
 		if (connect(s, res->ai_addr, res->ai_addrlen) >= 0) {
-			strcpy(addr_str, "unknown");
-			getnameinfo((struct sockaddr *)res->ai_addr,
-				    res->ai_addrlen, addr_str,
-				    sizeof(addr_str), NULL, 0, NI_NUMERICHOST);
+			if (getnameinfo((struct sockaddr *)res->ai_addr,
+					res->ai_addrlen, addr_str,
+					sizeof(addr_str), NULL, 0,
+					NI_NUMERICHOST))
+				snprintf(addr_str, sizeof(addr_str), "unknown");
 			printf("*** CONNECTED to %s\n", addr_str);
 			break;
 		}
@@ -661,7 +675,6 @@ fin0:
 
 static int do_main(void)
 {
-	int ret = -1;
 	pthread_t tid;
 
 	if ((fd_tun = open_tun()) < 0) {
@@ -704,9 +717,10 @@ static int do_main(void)
 
 	do_slip_rx(NULL);
 
-	pthread_cancel(tid);
 	pthread_join(tid, NULL);
-	ret = 0;
+	pthread_mutex_destroy(&mutex);
+	/* fd_ser, fd_tun is closed by do_slip_tx() and do_slip_rx() */
+	return 0;
 
 fin3:
 	pthread_mutex_destroy(&mutex);
@@ -715,13 +729,14 @@ fin2:
 fin1:
 	close(fd_tun);
 fin0:
-	return ret;
+	return -1;
 }
 
 int main(int argc, char *argv[])
 {
 	int ch;
 
+	signal(SIGPIPE, SIG_IGN);
 	extargv[extargc++] = argv[0];
 
 	while ((ch = getopt(argc, argv, "s:p:P:l:t:fx:")) != -1) {
