@@ -97,18 +97,25 @@ struct decode_work {
 
 static void set_die(bool status)
 {
+	int cs;
+
+	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cs);
 	pthread_mutex_lock(&mutex);
 	die = status;
 	pthread_mutex_unlock(&mutex);
+	pthread_setcancelstate(cs, NULL);
 }
 
 static bool get_die(void)
 {
+	int cs;
 	bool status;
 
+	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cs);
 	pthread_mutex_lock(&mutex);
 	status = die;
 	pthread_mutex_unlock(&mutex);
+	pthread_setcancelstate(cs, NULL);
 
 	return status;
 }
@@ -266,7 +273,6 @@ static void *do_slip_rx(__attribute__((unused)) void *arg)
 
 fin0:
 	set_die(true);
-	close(fd_tun);
 	return NULL;
 }
 
@@ -331,7 +337,6 @@ static void *do_slip_tx(__attribute__((unused)) void *arg)
 
 fin0:
 	set_die(true);
-	close(fd_ser);
 	return NULL;
 }
 
@@ -676,6 +681,7 @@ fin0:
 
 static int do_main(void)
 {
+	int ret = -1;
 	pthread_t tid;
 
 	if ((fd_tun = open_tun()) < 0) {
@@ -718,10 +724,9 @@ static int do_main(void)
 
 	do_slip_rx(NULL);
 
+	pthread_cancel(tid);
 	pthread_join(tid, NULL);
-	pthread_mutex_destroy(&mutex);
-	/* fd_ser, fd_tun is closed by do_slip_tx() and do_slip_rx() */
-	return 0;
+	ret = 0;
 
 fin3:
 	pthread_mutex_destroy(&mutex);
@@ -730,7 +735,7 @@ fin2:
 fin1:
 	close(fd_tun);
 fin0:
-	return -1;
+	return ret;
 }
 
 int main(int argc, char *argv[])
