@@ -66,6 +66,7 @@ static enum portmode portmode = NONE;
 static int portarg;
 
 static pthread_mutex_t mutex;
+static pthread_cond_t cond;
 static int fd_ser, fd_tun;
 static bool die = false;
 
@@ -95,29 +96,26 @@ struct decode_work {
 	bool drop;
 };
 
-static void set_die(bool status)
+static void notify_die(void)
 {
-	int cs;
+	int oldstate;
 
-	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cs);
+	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &oldstate);
+
 	pthread_mutex_lock(&mutex);
-	die = status;
+	die = true;
+	pthread_cond_signal(&cond);
 	pthread_mutex_unlock(&mutex);
-	pthread_setcancelstate(cs, NULL);
+
+	pthread_setcancelstate(oldstate, NULL);
 }
 
-static bool get_die(void)
+static void wait_for_die(void)
 {
-	int cs;
-	bool status;
-
-	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cs);
 	pthread_mutex_lock(&mutex);
-	status = die;
+	while (!die)
+		pthread_cond_wait(&cond, &mutex);
 	pthread_mutex_unlock(&mutex);
-	pthread_setcancelstate(cs, NULL);
-
-	return status;
 }
 
 __attribute__((weak)) int ext_encode(uint8_t **buf, int *len, uint8_t *exbuf, int exlen)
@@ -234,7 +232,7 @@ static void *do_slip_rx(__attribute__((unused)) void *arg)
 	};
 	int iovcnt;
 
-	while (!get_die()) {
+	while (1) {
 		if ((size = read(fd_ser, buf, sizeof(buf))) < 1) {
 			printf("slip read error\n");
 			goto fin0;
@@ -272,7 +270,7 @@ static void *do_slip_rx(__attribute__((unused)) void *arg)
 	}
 
 fin0:
-	set_die(true);
+	notify_die();
 	return NULL;
 }
 
@@ -312,7 +310,7 @@ static void *do_slip_tx(__attribute__((unused)) void *arg)
 	/* END_CHAR + escaped character(2) * received size + END_CHAR */
 	uint8_t buf[2 * (sizeof(exbuf) + sizeof(tun_rx)) + 2];
 
-	while (!get_die()) {
+	while (1) {
 		if ((size = read(fd_tun, tun_rx, sizeof(tun_rx))) < 0) {
 			printf("tun read error\n");
 			goto fin0;
@@ -336,7 +334,7 @@ static void *do_slip_tx(__attribute__((unused)) void *arg)
 	}
 
 fin0:
-	set_die(true);
+	notify_die();
 	return NULL;
 }
 
@@ -682,7 +680,7 @@ fin0:
 static int do_main(void)
 {
 	int ret = -1;
-	pthread_t tid;
+	pthread_t tid_tx, tid_rx;
 
 	if ((fd_tun = open_tun()) < 0) {
 		printf("device open error (tun)\n");
@@ -717,17 +715,31 @@ static int do_main(void)
 		goto fin2;
 	}
 
-	if (pthread_create(&tid, NULL, &do_slip_tx, NULL)) {
-		printf("pthread_create error\n");
+	if (pthread_cond_init(&cond, NULL)) {
+		printf("pthread_cond_init error\n");
 		goto fin3;
 	}
 
-	do_slip_rx(NULL);
+	if (pthread_create(&tid_tx, NULL, &do_slip_tx, NULL)) {
+		printf("pthread_create (tx) error\n");
+		goto fin4;
+	}
 
-	pthread_cancel(tid);
-	pthread_join(tid, NULL);
+	if (pthread_create(&tid_rx, NULL, &do_slip_rx, NULL)) {
+		printf("pthread_create (rx) error\n");
+		goto fin5;
+	}
+
+	wait_for_die();
 	ret = 0;
 
+	pthread_cancel(tid_rx);
+	pthread_join(tid_rx, NULL);
+fin5:
+	pthread_cancel(tid_tx);
+	pthread_join(tid_tx, NULL);
+fin4:
+	pthread_cond_destroy(&cond);
 fin3:
 	pthread_mutex_destroy(&mutex);
 fin2:
